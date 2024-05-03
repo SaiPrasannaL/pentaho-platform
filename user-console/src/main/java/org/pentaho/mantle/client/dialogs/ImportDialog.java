@@ -63,7 +63,7 @@ import org.pentaho.mantle.client.messages.Messages;
 public class ImportDialog extends PromptDialogBox {
 
   private static final String UPLOAD_ACCESS_DENIED_SNIPPET = "UnifiedRepositoryAccessDeniedException";
-  private static final String IMPORT_API_PATH = "api/repo/files/import";
+  private static final String IMPORT_API_PATH = "api/repo/files/import/multiple";
 
   /**
    * The name of the CSRF token field to use when CSRF protection is disabled.
@@ -177,17 +177,22 @@ public class ImportDialog extends PromptDialogBox {
 
     final FileUpload upload = new FileUpload();
     upload.setName( "fileUpload" );
+    upload.getElement().setAttribute("multiple", "multiple");
+
     ChangeHandler fileUploadHandler = new ChangeHandler() {
       @Override
       public void onChange( ChangeEvent event ) {
-        fileTextBox.setText( upload.getFilename() );
+
         if ( !"".equals( importDir.getValue() ) ) {
+          String selectedFiles = getSelectedFiles(upload);
+
           //Set the fileNameOverride because the fileUpload object can only reliably transmit US-ASCII
           //character set.  See RFC283 section 2.3 for details
-          String fileNameValue = upload.getFilename().replaceAll( "\\\\", "/" );
-          fileNameValue = fileNameValue.substring( fileNameValue.lastIndexOf( "/" ) + 1 );
-          fileNameOverride.setValue( fileNameValue );
-          okButton.setEnabled( true );
+
+          fileNameOverride.setValue( selectedFiles );
+          fileTextBox.setText( selectedFiles );
+
+          okButton.setEnabled( !selectedFiles.isEmpty() );
         } else {
           okButton.setEnabled( false );
         }
@@ -405,6 +410,15 @@ public class ImportDialog extends PromptDialogBox {
      logWindow.document.write(htmlText);
   }-*/;
 
+  // Method to extract selected filenames from FileUpload widget using JavaScript
+  private native String getSelectedFiles(FileUpload upload) /*-{
+    var files = upload.@com.google.gwt.user.client.ui.FileUpload::getElement()().files;
+    var selectedFiles = [];
+    for (var i = 0; i < files.length; i++) {
+      selectedFiles.push(files[i].name);
+    }
+    return selectedFiles.join(",");
+  }-*/;
   /**
    * Setups the form panel action URL, having in account the GWT context URL.
    */

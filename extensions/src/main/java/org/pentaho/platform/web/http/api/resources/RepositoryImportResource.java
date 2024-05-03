@@ -31,6 +31,7 @@ import javax.ws.rs.Produces;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 
+import com.sun.jersey.multipart.FormDataBodyPart;
 import org.apache.commons.lang.StringUtils;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -51,6 +52,10 @@ import org.pentaho.platform.web.http.api.resources.services.FileService;
 import com.sun.jersey.core.header.FormDataContentDisposition;
 import com.sun.jersey.multipart.FormDataParam;
 import org.pentaho.platform.web.http.api.resources.utils.SystemUtils;
+
+import java.util.Arrays;
+import java.util.List;
+import java.util.stream.Collectors;
 
 @Path ( "/repo/files/import" )
 public class RepositoryImportResource {
@@ -171,98 +176,158 @@ public class RepositoryImportResource {
                                 @FormDataParam ( "logLevel" ) String logLevel,
                                 @FormDataParam ( "fileUpload" ) FormDataContentDisposition fileInfo,
                                 @FormDataParam ( "fileNameOverride" ) String fileNameOverride ) {
-    IRepositoryImportLogger importLogger = null;
-    ByteArrayOutputStream importLoggerStream = new ByteArrayOutputStream();
-    boolean logJobStarted = false;
-
-    if ( StringUtils.isBlank( charSet ) ) {
-      charSet =  DEFAULT_CHAR_SET;
-    }
-
-    try {
-      validateImportAccess( importDir );
-
-      boolean overwriteFileFlag = ( "false".equals( overwriteFile ) ? false : true );
-      boolean overwriteAclSettingsFlag = ( "true".equals( overwriteAclPermissions ) ? true : false );
-      boolean applyAclSettingsFlag = ( "true".equals( applyAclPermission ) ? true : false );
-      boolean retainOwnershipFlag = ( "true".equals( retainOwnership ) ? true : false );
-      // If logLevel is null then we will default to ERROR
-      if ( logLevel == null || logLevel.length() <= 0 ) {
-        logLevel = "ERROR";
-      }
-
-      //Non-admins cannot process a manifest
-      FileService fileService = new FileService();
-      if ( !fileService.doCanAdminister() ) {
-        applyAclSettingsFlag = false;
-        retainOwnershipFlag = true;
-      }
-
-      Level level = Level.toLevel( logLevel );
-      ImportSession.getSession().setAclProperties( applyAclSettingsFlag,
-          retainOwnershipFlag, overwriteAclSettingsFlag );
-
-      //The fileNameOverride was added because the formDataContentDispositionfile object cannot reliable
-      //contain non US-ASCII characters.  See RFC283 section 2.3 for details
-      String fileName = fileNameOverride != null ? fileNameOverride : fileInfo.getFileName();
-
-      RepositoryFileImportBundle.Builder bundleBuilder = new RepositoryFileImportBundle.Builder();
-      bundleBuilder.input( fileUpload );
-      bundleBuilder.charSet( charSet );
-      bundleBuilder.path( importDir );
-      bundleBuilder.overwriteFile( overwriteFileFlag );
-      bundleBuilder.applyAclSettings( applyAclSettingsFlag );
-      bundleBuilder.overwriteAclSettings( overwriteAclSettingsFlag );
-      bundleBuilder.retainOwnership( retainOwnershipFlag );
-      bundleBuilder.name( fileName );
-      IPlatformImportBundle bundle = bundleBuilder.build();
-
-      IPlatformMimeResolver mimeResolver = PentahoSystem.get( IPlatformMimeResolver.class );
-      String mimeTypeFromFile = mimeResolver.resolveMimeForFileName( fileName );
-      if ( mimeTypeFromFile == null ) {
-        return Response.ok( "INVALID_MIME_TYPE", MediaType.TEXT_HTML ).build();
-      }
-      bundleBuilder.mime( mimeTypeFromFile );
-
-      IPlatformImporter importer = PentahoSystem.get( IPlatformImporter.class );
-      importLogger = importer.getRepositoryImportLogger();
-
-      final String mimeType =
-          bundle.getMimeType() != null ? bundle.getMimeType() : mimeResolver.resolveMimeForBundle( bundle );
-      if ( mimeType == null ) {
-        return Response.ok( "INVALID_MIME_TYPE", MediaType.TEXT_HTML ).build();
-      }
-
-      logJobStarted = true;
-      importLogger.startJob( importLoggerStream, importDir, level );
-      importer.importFile( bundle );
-
-      // Flush the Mondrian cache to show imported data-sources.
-      IMondrianCatalogService mondrianCatalogService =
-          PentahoSystem.get( IMondrianCatalogService.class, "IMondrianCatalogService", PentahoSessionHolder
-              .getSession() );
-      mondrianCatalogService.reInit( PentahoSessionHolder.getSession() );
-    } catch ( Exception e ) {
-      return Response.serverError().entity( e.toString() ).build();
-    } finally {
-      ImportSession.clearSession();
-      if ( logJobStarted == true ) {
-        importLogger.endJob();
-      }
-    }
-    String responseBody;
-    try {
-      responseBody = importLoggerStream.toString( charSet );
-    } catch ( UnsupportedEncodingException e ) {
-      LOGGER.error( "Encoding of response body is failed. (charSet=" + charSet + ")", e );
-      responseBody = importLoggerStream.toString();
-    }
-    return Response.ok( responseBody, MediaType.TEXT_HTML ).build();
+    return  doPostImportCommon(importDir, Arrays.asList(fileUpload), overwriteFile, overwriteAclPermissions, applyAclPermission,
+            retainOwnership, charSet, logLevel, fileInfo, fileNameOverride);
   }
+
 
   protected void validateImportAccess( String importDir ) throws PentahoAccessControlException {
     boolean canUpload = SystemUtils.canUpload( importDir );
     if ( !canUpload ) {
       throw new PentahoAccessControlException( "User is not authorized to perform this operation" );
     }
-  } }
+  }
+
+  /**
+   * Attempts to import all files from the zip archive or multiple files. A log file is produced at the end of import.
+   * this has been written as the above api was called in multiple places like reporting module...
+   *
+   * @param importDir
+   * @param fileParts
+   * @param overwriteFile
+   * @param overwriteAclPermissions
+   * @param applyAclPermission
+   * @param retainOwnership
+   * @param charSet
+   * @param logLevel
+   * @param fileInfo
+   * @param fileNameOverride
+   * @return
+   */
+  @POST()
+  @Path ( "/multiple" )
+  @Consumes ( MediaType.MULTIPART_FORM_DATA )
+  @Produces ( MediaType.TEXT_HTML )
+  @Facet( name = "Unsupported" )
+  public Response doPostImport( @FormDataParam ( "importDir" ) String importDir,
+                                @FormDataParam ( "fileUpload" ) List<FormDataBodyPart> fileParts,
+                                @FormDataParam ( "overwriteFile" ) String overwriteFile,
+                                @FormDataParam ( "overwriteAclPermissions" ) String overwriteAclPermissions,
+                                @FormDataParam ( "applyAclPermissions" ) String applyAclPermission,
+                                @FormDataParam ( "retainOwnership" ) String retainOwnership,
+                                @FormDataParam ( "charSet" ) String charSet,
+                                @FormDataParam ( "logLevel" ) String logLevel,
+                                @FormDataParam ( "fileUpload" ) FormDataContentDisposition fileInfo,
+                                @FormDataParam ( "fileNameOverride" ) String fileNameOverride ) {
+    List<InputStream> fileUploads = fileParts.stream()
+            .map(part -> part.getValueAs(InputStream.class))
+            .collect(Collectors.toList());
+    return doPostImportCommon(importDir, fileUploads, overwriteFile, overwriteAclPermissions, applyAclPermission,
+            retainOwnership, charSet, logLevel, fileInfo, fileNameOverride);
+  }
+
+  /**
+   * common code extracted to this new method
+   *
+   * @param importDir
+   * @param fileUploads
+   * @param overwriteFile
+   * @param overwriteAclPermissions
+   * @param applyAclPermission
+   * @param retainOwnership
+   * @param charSet
+   * @param logLevel
+   * @param fileInfo
+   * @param fileNameOverride
+   * @return
+   */
+  private Response doPostImportCommon(String importDir, List<InputStream> fileUploads, String overwriteFile,
+                                      String overwriteAclPermissions, String applyAclPermission, String retainOwnership,
+                                      String charSet, String logLevel, FormDataContentDisposition fileInfo,
+                                      String fileNameOverride) {
+    IRepositoryImportLogger importLogger = null;
+    ByteArrayOutputStream importLoggerStream = new ByteArrayOutputStream();
+    boolean logJobStarted = false;
+
+    if (StringUtils.isBlank(charSet)) {
+      charSet = DEFAULT_CHAR_SET;
+    }
+
+    try {
+      validateImportAccess(importDir);
+
+      boolean overwriteFileFlag = ("false".equals(overwriteFile) ? false : true);
+      boolean overwriteAclSettingsFlag = ("true".equals(overwriteAclPermissions) ? true : false);
+      boolean applyAclSettingsFlag = ("true".equals(applyAclPermission) ? true : false);
+      boolean retainOwnershipFlag = ("true".equals(retainOwnership) ? true : false);
+      // If logLevel is null then we will default to ERROR
+      if (logLevel == null || logLevel.length() <= 0) {
+        logLevel = "ERROR";
+      }
+
+      // Non-admins cannot process a manifest
+      FileService fileService = new FileService();
+      if (!fileService.doCanAdminister()) {
+        applyAclSettingsFlag = false;
+        retainOwnershipFlag = true;
+      }
+
+      Level level = Level.toLevel(logLevel);
+      ImportSession.getSession().setAclProperties(applyAclSettingsFlag, retainOwnershipFlag, overwriteAclSettingsFlag);
+
+      IPlatformMimeResolver mimeResolver = PentahoSystem.get(IPlatformMimeResolver.class);
+      IPlatformImporter importer = PentahoSystem.get(IPlatformImporter.class);
+      importLogger = importer.getRepositoryImportLogger();
+      importLogger.startJob(importLoggerStream, importDir, level);
+
+      List<String> fileNameOverrides = Arrays.asList(fileNameOverride.split(","));
+
+      for (int i = 0; i < fileNameOverrides.size(); i++) {
+        InputStream fileUpload = fileUploads.get(i);
+
+        String fileName = fileNameOverrides.get(i);
+
+        RepositoryFileImportBundle.Builder bundleBuilder = new RepositoryFileImportBundle.Builder();
+        bundleBuilder.input(fileUpload);
+        bundleBuilder.charSet(charSet);
+        bundleBuilder.path(importDir);
+        bundleBuilder.overwriteFile(overwriteFileFlag);
+        bundleBuilder.applyAclSettings(applyAclSettingsFlag);
+        bundleBuilder.overwriteAclSettings(overwriteAclSettingsFlag);
+        bundleBuilder.retainOwnership(retainOwnershipFlag);
+        bundleBuilder.name(fileName);
+
+        IPlatformImportBundle bundle = bundleBuilder.build();
+        String mimeTypeFromFile = mimeResolver.resolveMimeForFileName(fileName);
+
+        if (mimeTypeFromFile == null) {
+          return Response.ok("INVALID_MIME_TYPE", MediaType.TEXT_HTML).build();
+        }
+
+        bundleBuilder.mime(mimeTypeFromFile);
+        importer.importFile(bundle);
+      }
+
+      // Flush the Mondrian cache to show imported data-sources.
+      IMondrianCatalogService mondrianCatalogService = PentahoSystem.get(IMondrianCatalogService.class, "IMondrianCatalogService",
+              PentahoSessionHolder.getSession());
+      mondrianCatalogService.reInit(PentahoSessionHolder.getSession());
+      logJobStarted = true;
+    } catch (Exception e) {
+      return Response.serverError().entity(e.toString()).build();
+    } finally {
+      ImportSession.clearSession();
+      if (logJobStarted == true) {
+        importLogger.endJob();
+      }
+    }
+    String responseBody;
+    try {
+      responseBody = importLoggerStream.toString(charSet);
+    } catch (UnsupportedEncodingException e) {
+      LOGGER.error("Encoding of response body is failed. (charSet=" + charSet + ")", e);
+      responseBody = importLoggerStream.toString();
+    }
+    return Response.ok(responseBody, MediaType.TEXT_HTML).build();
+  }
+}
